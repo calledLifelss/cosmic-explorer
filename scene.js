@@ -18,6 +18,7 @@ const Scene3D = (() => {
   let starCount = 0;
   // فرمانرو کیفیت تطبیقی: رزولوشن رندر را بر اساس نرخ فریم واقعی تنظیم می‌کند
   let maxDpr = 1, dpr = 1, govT = 0, emaFps = 60;
+  let liteMode = false; // حالت Lite: ساده‌سازی شیدرها برای دستگاه‌های بسیار ضعیف
   let orbits = {};      // id -> line
   let labelsOn = true, orbitsOn = true, shadowsOn = true;
   let simSpeed = 1, paused = false, simDays = 0;
@@ -463,7 +464,8 @@ const Scene3D = (() => {
   /* ============ صحنه ============ */
   function init(container, opts) {
     onSelect = opts.onSelect; onHover = opts.onHover;
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance", stencil: false });
+    // صفحات HiDPI به AA نیاز ندارند (پیکسل‌ها به‌اندازه کافی ریزند) — حذف MSAA آنجا هزینه پر‌کردن را جدی کم می‌کند
+    renderer = new THREE.WebGLRenderer({ antialias: (devicePixelRatio || 1) < 1.5, alpha: true, powerPreference: "high-performance", stencil: false });
     // Keep high-density phones from rendering four times as many pixels.
     maxDpr = Math.min(matchMedia("(pointer: coarse)").matches ? 1.5 : 2, devicePixelRatio || 1);
     dpr = maxDpr;
@@ -590,6 +592,10 @@ const Scene3D = (() => {
       if (b.id === "sun") {
         mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 64), makeSunMaterial(makeTexture("sun")));
         tiltGrp.add(mesh);
+        // متریال سبک جایگزین برای حالت Lite (بدون شیدر پلاسما)
+        const liteMat = new THREE.MeshBasicMaterial({ map: makeTexture("sun"), color: 0xffd9a0 });
+        upgradeMap(liteMat, "map", REAL_TEX.sun, true);
+        grp.userData.liteMat = liteMat; grp.userData.heavyMat = mesh.material;
         const cor1 = new THREE.Sprite(new THREE.SpriteMaterial({
           map: glowTexture("rgba(255,225,160,.95)", "rgba(255,160,60,.32)"),
           transparent: true, opacity: 0.5, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, fog: false
@@ -978,6 +984,21 @@ const Scene3D = (() => {
   }
 
   let lastNow = 0;
+  /* حالت Lite: جایگزینی شیدر پلاسمای خورشید با متریال ساده و خاموشی
+     اتمسفرها، ابرها و کرونا — برای سخت‌افزار بدون شتاب گرافیکی واقعی */
+  function setLite(v) {
+    liteMode = v;
+    const sun = bodies.sun;
+    if (sun && sun.group.userData.liteMat) {
+      sun.mesh.material = v ? sun.group.userData.liteMat : sun.group.userData.heavyMat;
+    }
+    bodiesArr.forEach(o => {
+      const u = o.group.userData;
+      if (u.atmo) u.atmo.visible = !v;
+      if (u.clouds) u.clouds.visible = !v;
+      if (u.corona) u.corona.forEach(c => c.visible = !v);
+    });
+  }
   function loop() {
     requestAnimationFrame(loop);
     // دلتای واقعی فریم با سقف ۵۰ms: برگشت از تب پس‌زمینه باعث پرش دوربین نمی‌شود
@@ -995,7 +1016,10 @@ const Scene3D = (() => {
       if (fps < 30 && dpr > 0.5) nd = Math.max(0.5, dpr - 0.25);
       else if (fps > 55 && dpr < maxDpr) nd = Math.min(maxDpr, dpr + 0.25);
       if (nd !== dpr) { dpr = nd; renderer.setPixelRatio(dpr); renderer.setSize(innerWidth, innerHeight); }
-      window.__CE_QUALITY = dpr >= maxDpr - 0.01 ? 1 : (dpr >= 0.74 ? 0.75 : 0.5);
+      // با کمترین رزولوشن هم هنوز کُند؟ ساده‌سازی شیدرها؛ با حاشیه امن بازگردان
+      if (fps < 24 && dpr <= 0.5 && !liteMode) setLite(true);
+      else if (fps > 50 && dpr >= maxDpr - 0.01 && liteMode) setLite(false);
+      window.__CE_QUALITY = liteMode ? 0.25 : dpr >= maxDpr - 0.01 ? 1 : (dpr >= 0.74 ? 0.75 : 0.5);
     }
     time += 0.016;
     const dt = paused ? 0 : 0.016 * simSpeed; // فیزیک مدارها — جدا از دوربین و دست‌نخورده
@@ -1005,7 +1029,7 @@ const Scene3D = (() => {
         o.mesh.rotation.y += dt * SUN_SPIN;
         // تپش بسیار ظریف تاج خورشیدی
         const cb = o.group.userData.corBase, cor = o.group.userData.corona;
-        if (cb && cor && !reduceMotion) cor.forEach((c, i) => c.scale.setScalar(cb[i] * (1 + Math.sin(time * 1.7 + i * 2.1) * 0.02 + Math.sin(time * 0.55 + i) * 0.012)));
+        if (cb && cor && !reduceMotion && !liteMode) cor.forEach((c, i) => c.scale.setScalar(cb[i] * (1 + Math.sin(time * 1.7 + i * 2.1) * 0.02 + Math.sin(time * 0.55 + i) * 0.012)));
         return;
       }
       o.angle += dt * o.speed * 0.25;
