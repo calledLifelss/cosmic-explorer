@@ -454,17 +454,32 @@ function presReadT(i) {
 }
 let presCueT = [];
 function presClearCues() { presCueT.forEach(clearTimeout); presCueT = []; }
-function presRenderText(i) {
+function presRenderText(i, onDone) {
   presClearCues();
   const box = $("#presTxt");
   const sents = (PRES[i].x.match(/[^.؟]+[.؟]?/g) || [PRES[i].x]).map(t => t.trim()).filter(Boolean);
   box.innerHTML = "";
-  sents.forEach((t, k) => {
+  const rows = sents.map(t => {
     const sp = document.createElement("span");
-    sp.className = "ps"; sp.textContent = t;
+    sp.className = "ps on";
     box.appendChild(sp);
-    presCueT.push(setTimeout(() => sp.classList.add("on"), 60 + k * 180)); // آبشار سریع، همه در ثانیه اول
+    return { sp, chars: Array.from(t) };
   });
+  // One cancellable timer, with elapsed-time progress: no timer per character.
+  const duration = REDUCED_MOTION ? 0 : presReadT(i) * 1000;
+  const total = rows.reduce((n, row) => n + row.chars.length, 0);
+  const started = performance.now();
+  function type() {
+    if (presIdx !== i) return;
+    let remaining = duration ? Math.min(total, Math.floor((performance.now() - started) / duration * total)) : total;
+    rows.forEach(row => {
+      row.sp.textContent = row.chars.slice(0, Math.max(0, remaining)).join("");
+      remaining -= row.chars.length;
+    });
+    if (!duration || performance.now() - started >= duration) { onDone(); return; }
+    presCueT = [setTimeout(type, 30)];
+  }
+  type();
 }
 
 /* قفل مرحله: تا انیمیشن مرحله کامل نشده، «بعدی» خاکستری/غیرفعال است
@@ -485,12 +500,12 @@ function presLock(sec) {
   } else presLocked = false;
 }
 
-function presSchedule() {
+function presSchedule(afterTyping = false) {
   clearTimeout(presTimer);
   if (!presAutoOn || presIdx < 0) return;
   $("#presAuto").hidden = false;
   const dur = (typeof PresFX !== "undefined") ? PresFX.dur(presIdx) : 0;
-  const delay = Math.max(PRES_DWELL[presIdx] || 8, presReadT(presIdx) + dur + 1) * 1000;
+  const delay = (afterTyping ? Math.max(dur + 1, (PRES_DWELL[presIdx] || 8) - presReadT(presIdx)) : Math.max(PRES_DWELL[presIdx] || 8, presReadT(presIdx) + dur + 1)) * 1000;
   presTimer = setTimeout(() => { if (presAutoOn && presIdx >= 0) presGo(presIdx + 1); }, delay);
   // نوار زمانِ باقی‌مانده تا مرحله بعد، زیر چیپ پخش خودکار
   const f = $("#presAutoFill");
@@ -532,7 +547,6 @@ function presGo(i) {
   const s = PRES[i];
   $("#presStep").textContent = faD(i + 1) + " از " + faD(PRES.length);
   $("#presTitle").textContent = s.t;
-  presRenderText(i);
   $("#pres").classList.remove("playing");
   $("#presPrev").disabled = i === 0;
   $("#presNextTxt").textContent = i === PRES.length - 1 ? "پایان ارائه" : "بعدی";
@@ -553,13 +567,14 @@ function presGo(i) {
   // فاز ۲: پس از زمان خواندن، انیمیشن پخش و متن کم‌رنگ می‌شود
   const dur = (typeof PresFX !== "undefined") ? PresFX.dur(i) : 0;
   const rt = presReadT(i);
-  presAnimT = setTimeout(() => {
+  presLock((REDUCED_MOTION ? 0 : rt) + dur);
+  presRenderText(i, () => {
     if (presIdx !== i) return;
     if (typeof PresFX !== "undefined") PresFX.play(i);
     $("#pres").classList.add("playing");
-  }, rt * 1000);
-  presLock(rt + dur);
-  presSchedule();
+    presLock(dur);
+    presSchedule(true);
+  });
 }
 
 function endPres() {
