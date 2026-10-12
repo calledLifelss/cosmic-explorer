@@ -46,7 +46,9 @@ header, #dock, #infoPanel, #bodyBar, #tour, #travel, .sheet, .toastmsg, #tip, #s
 #dock, #infoPanel, .sheet, #pres, #bodyBar{box-shadow:var(--shadow)}
 #scene{position:fixed; inset:0}
 #scene canvas{display:block}
-#presFx{position:fixed; inset:0; z-index:5; pointer-events:none}
+/* اندازه CSS صریح لازم است؛ وگرنه بوم با اندازه بافر (W×DPR) نمایش داده می‌شود
+   و روی گوشی (DPR≥2) انیمیشن‌ها از صفحه بیرون می‌افتند */
+#presFx{position:fixed; inset:0; width:100%; height:100%; z-index:5; pointer-events:none}
 
 /* آیکون‌های خطی */
 .svg-sprite{display:none}
