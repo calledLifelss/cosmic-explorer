@@ -14,6 +14,7 @@
 const Scene3D = (() => {
   let renderer, scene, camera, raycaster, pointer, sunLight;
   let bodies = {};      // id -> {group, mesh, label, angle, speed, dist}
+  const bodiesArr = []; // نسخه آرایه‌ای bodies برای حلقه‌های داغ فریم (بدون ساخت آرایه موقت)
   let starCount = 0;
   // فرمانرو کیفیت تطبیقی: رزولوشن رندر را بر اساس نرخ فریم واقعی تنظیم می‌کند
   let maxDpr = 1, dpr = 1, govT = 0, emaFps = 60;
@@ -22,7 +23,7 @@ const Scene3D = (() => {
   let simSpeed = 1, paused = false, simDays = 0;
   let sizeScale = 1, distScale = 1, dwarfsOn = false;
   let selected = null, travelCb = null;
-  let hovered = null, onSelect = null, onHover = null;
+  let hovered = null, onSelect = null, onHover = null, pendingHover = null;
   let time = 0, reduceMotion = false, maxAniso = 4;
   const animated = [];  // {update(t, dt)}
   const BASE_DIST = {}, BASE_SIZE = {};
@@ -462,7 +463,7 @@ const Scene3D = (() => {
   /* ============ صحنه ============ */
   function init(container, opts) {
     onSelect = opts.onSelect; onHover = opts.onHover;
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance", stencil: false });
     // Keep high-density phones from rendering four times as many pixels.
     maxDpr = Math.min(matchMedia("(pointer: coarse)").matches ? 1.5 : 2, devicePixelRatio || 1);
     dpr = maxDpr;
@@ -715,6 +716,7 @@ const Scene3D = (() => {
       const dayH = DAY_HOURS[b.id];
       const spin = dayH ? (SPIN_REF * 23.93 / Math.abs(dayH)) * Math.sign(dayH) : SPIN_REF;
       bodies[b.id] = { def: b, group: grp, mesh, tiltGrp, label, sel, ringMeshes, angle: (INITIAL_ANGLE[b.id] !== undefined ? INITIAL_ANGLE[b.id] : Math.random() * Math.PI * 2), speed: BASE_SPEED[b.id] || 0.2, spin, lift: ((b.id.charCodeAt(0) + b.id.length) % 2) * 1.5 };
+      bodiesArr.push(bodies[b.id]);
       if (b.dwarf) grp.visible = false;
     });
     layout();
@@ -948,20 +950,31 @@ const Scene3D = (() => {
       else if (e.key === "-") { userInterrupt(); camS.radius *= 1.1; }
       else if (e.key.toLowerCase() === "h" || e.key === "۰") resetView();
     });
-    function updateHover(e) {
-      pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -(e.clientY / innerHeight) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObjects(Object.values(bodies).filter(o => o.group.visible).map(o => o.mesh));
-      const id = hits.length ? hits[0].object.userData.id : null;
-      if (id !== hovered) { hovered = id; el.style.cursor = id ? "pointer" : "grab"; onHover && onHover(id, e.clientX, e.clientY); }
-      else if (id) onHover && onHover(id, e.clientX, e.clientY);
-    }
+    /* هاور فقط مختصات را ذخیره می‌کند؛ ری‌کست یک‌بار در فریم بعدی انجام می‌شود */
+    function updateHover(e) { pendingHover = { x: e.clientX, y: e.clientY }; }
     function pick(e) {
-      pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -(e.clientY / innerHeight) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObjects(Object.values(bodies).filter(o => o.group.visible).map(o => o.mesh));
-      onSelect && onSelect(hits.length ? hits[0].object.userData.id : null);
+      onSelect && onSelect(hitAt((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1));
     }
+  }
+
+  /* برخورد تحلیلی پرتو–کره برای هاور/انتخاب: به‌جای پیمایش هزاران مثلثِ مش
+     در هر حرکت ماوس، فقط یک آزمون کروی ارزان برای هر جرم انجام می‌شود. */
+  const _hc = new THREE.Vector3();
+  function hitAt(nx, ny) {
+    pointer.x = nx; pointer.y = ny;
+    raycaster.setFromCamera(pointer, camera);
+    const ray = raycaster.ray;
+    let best = null, bestT = Infinity;
+    for (let i = 0; i < bodiesArr.length; i++) {
+      const o = bodiesArr[i];
+      if (!o.group.visible) continue;
+      _hc.copy(o.group.position).sub(ray.origin);
+      const t = _hc.dot(ray.direction);
+      if (t < 0) continue; // پشت دوربین
+      const r = Math.max(o.mesh.scale.x, o.mesh.scale.y, o.mesh.scale.z) + 0.06;
+      if (_hc.lengthSq() - t * t <= r * r && t < bestT) { bestT = t; best = o.def.id; }
+    }
+    return best;
   }
 
   let lastNow = 0;
@@ -972,22 +985,22 @@ const Scene3D = (() => {
     const realDt = lastNow ? (now - lastNow) / 1000 : 0.016; // دلتای خام برای سنجش نرخ فریم
     let rdt = Math.min(0.05, Math.max(0.0005, realDt));
     lastNow = now;
-    // فرمانرو کیفیت: هر ~۲٫۲ ثانیه بر اساس میانگین نرم نرخ فریم تصمیم می‌گیرد
+    // فرمانرو کیفیت: هر ~۱٫۵ ثانیه بر اساس میانگین نرم نرخ فریم تصمیم می‌گیرد
     emaFps = emaFps * 0.9 + (1 / Math.max(realDt, 1e-4)) * 0.1;
     govT += realDt;
-    if (govT > 2.2) {
+    if (govT > 1.5) {
       govT = 0;
       const fps = (typeof window.__CE_forceFps === "number") ? window.__CE_forceFps : emaFps;
       let nd = dpr;
-      if (fps < 27 && dpr > 0.5) nd = Math.max(0.5, dpr - 0.25);
-      else if (fps > 52 && dpr < maxDpr) nd = Math.min(maxDpr, dpr + 0.25);
+      if (fps < 30 && dpr > 0.5) nd = Math.max(0.5, dpr - 0.25);
+      else if (fps > 55 && dpr < maxDpr) nd = Math.min(maxDpr, dpr + 0.25);
       if (nd !== dpr) { dpr = nd; renderer.setPixelRatio(dpr); renderer.setSize(innerWidth, innerHeight); }
       window.__CE_QUALITY = dpr >= maxDpr - 0.01 ? 1 : (dpr >= 0.74 ? 0.75 : 0.5);
     }
     time += 0.016;
     const dt = paused ? 0 : 0.016 * simSpeed; // فیزیک مدارها — جدا از دوربین و دست‌نخورده
     animated.forEach(a => { try { a.update(time, dt); } catch (e) {} });
-    Object.values(bodies).forEach(o => {
+    bodiesArr.forEach(o => {
       if (o.def.id === "sun") {
         o.mesh.rotation.y += dt * SUN_SPIN;
         // تپش بسیار ظریف تاج خورشیدی
@@ -1001,16 +1014,23 @@ const Scene3D = (() => {
     });
     if (!paused) simDays += dt * 12;
     updateCamera(rdt); // تنها نقطه به‌روزرسانی دوربین؛ با زمان واقعی، نه سرعت شبیه‌سازی
+    // هاور ذخیره‌شده: حداکثر یک ری‌کست در هر فریم (نه یکی به‌ازای هر رویداد ماوس)
+    if (pendingHover) {
+      const h = pendingHover; pendingHover = null;
+      const id = hitAt((h.x / innerWidth) * 2 - 1, -(h.y / innerHeight) * 2 + 1);
+      if (id !== hovered) { hovered = id; renderer.domElement.style.cursor = id ? "pointer" : "grab"; onHover && onHover(id, h.x, h.y); }
+      else if (id) onHover && onHover(id, h.x, h.y);
+    }
     if (selPulse > 0.002) {
       selPulse *= Math.pow(0.94, rdt * 60);
-      Object.values(bodies).forEach(o => {
+      bodiesArr.forEach(o => {
         if (o.sel.visible) {
           o.sel.scale.setScalar(o.size * (1 + selPulse * 0.22));
           o.sel.material.opacity = 0.6 + 0.3 * (1 - selPulse);
         }
       });
     }
-    Object.values(bodies).forEach(o => {
+    bodiesArr.forEach(o => {
       const d = camera.position.distanceTo(o.group.position);
       const s = Math.max(2.4, Math.min(8, d * 0.055));
       o.label.scale.set(s, s * 0.25, 1);
@@ -1144,9 +1164,7 @@ const Scene3D = (() => {
   /* ری‌کست در مختصات NDC برای راستی‌آزمایی مسیر انتخاب (فقط خواندنی) */
   function dbgHit(nx, ny) {
     if (!camera || !raycaster) return null;
-    raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera);
-    const hits = raycaster.intersectObjects(Object.values(bodies).filter(o => o.group.visible).map(o => o.mesh));
-    return hits.length ? hits[0].object.userData.id : null;
+    return hitAt(nx, ny);
   }
 
   function getPixelRatio() { return dpr; }
